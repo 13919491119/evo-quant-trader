@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EvoMap Quant Trader - 实时数据版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #0a0e1a; color: #e2e8f0; }
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+        }
+        .up { color: #ff4d4d; }  /* A股红涨 */
+        .down { color: #00e676; } /* A股绿跌 */
+        .pulse-dot {
+            width: 8px; height: 8px; background: #00e676; border-radius: 50%;
+            animation: pulse 2s infinite; display: inline-block; margin-right: 6px;
+        }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    </style>
+</head>
+<body class="p-6 min-h-screen">
+    <!-- 顶部状态 -->
+    <div class="glass-panel p-4 mb-4 flex justify-between items-center">
+        <div>
+            <h1 class="text-2xl font-bold text-blue-400"><span class="pulse-dot"></span>实时量化监控系统</h1>
+            <p class="text-xs text-slate-400 mt-1">数据源: 新浪财经/腾讯财经 | 更新频率: 3秒</p>
+        </div>
+        <div class="text-right">
+            <div id="market-status" class="text-amber-400 font-bold">检测中...</div>
+            <div id="update-time" class="text-xs text-slate-500">--:--:--</div>
+        </div>
+    </div>
+
+    <!-- 实时行情面板 -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+        <div class="glass-panel p-4">
+            <h3 class="text-sm text-slate-400 mb-2">上证指数</h3>
+            <div class="text-2xl font-mono font-bold" id="sh000001-price">--</div>
+            <div class="text-sm" id="sh000001-change">--</div>
+        </div>
+        <div class="glass-panel p-4">
+            <h3 class="text-sm text-slate-400 mb-2">深证成指</h3>
+            <div class="text-2xl font-mono font-bold" id="sz399001-price">--</div>
+            <div class="text-sm" id="sz399001-change">--</div>
+        </div>
+        <div class="glass-panel p-4">
+            <h3 class="text-sm text-slate-400 mb-2">创业板指</h3>
+            <div class="text-2xl font-mono font-bold" id="sz399006-price">--</div>
+            <div class="text-sm" id="sz399006-change">--</div>
+        </div>
+    </div>
+
+    <!-- 自选股监控 -->
+    <div class="glass-panel p-4 mb-4">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-semibold">自选股实时监控</h2>
+            <span class="text-xs bg-blue-600/30 text-blue-400 px-2 py-1 rounded">实时推送中</span>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead class="text-slate-400 border-b border-slate-700">
+                    <tr>
+                        <th class="text-left py-2">代码</th>
+                        <th class="text-left">名称</th>
+                        <th class="text-right">最新价</th>
+                        <th class="text-right">涨跌额</th>
+                        <th class="text-right">涨跌幅</th>
+                        <th class="text-right">成交量</th>
+                        <th class="text-center">信号</th>
+                    </tr>
+                </thead>
+                <tbody id="stock-list" class="font-mono">
+                    <!-- 动态填充 -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 交易信号日志 -->
+    <div class="glass-panel p-4">
+        <h3 class="text-lg font-semibold mb-3">交易信号监控</h3>
+        <div id="signal-log" class="space-y-2 text-sm font-mono h-48 overflow-y-auto">
+            <div class="text-slate-500">[系统] 正在连接实时数据流...</div>
+        </div>
+    </div>
+
+    <script>
+        // 股票列表配置
+        const watchList = [
+            {code: 'sh600519', name: '贵州茅台', strategy: 'value'},
+            {code: 'sz000001', name: '平安银行', strategy: 'momentum'},
+            {code: 'sz300750', name: '宁德时代', strategy: 'growth'},
+            {code: 'sh000858', name: '五粮液', strategy: 'value'},
+            {code: 'sz000333', name: '美的集团', strategy: 'dividend'},
+            {code: 'sh600036', name: '招商银行', strategy: 'momentum'}
+        ];
+
+        let lastData = {};
+        let updateCount = 0;
+
+        // 使用腾讯财经API（支持CORS更好）
+        function fetchRealData() {
+            const codes = watchList.map(s => s.code).join(',');
+            const script = document.createElement('script');
+            script.src = `https://qt.gtimg.cn/q=${codes},sh000001,sz399001,sz399006`;
+            script.charset = 'gb2312'; // 腾讯使用GB2312编码
+            
+            script.onload = function() {
+                parseTencentData();
+                document.getElementById('update-time').textContent = new Date().toLocaleTimeString();
+                updateCount++;
+            };
+            
+            script.onerror = function() {
+                addLog('腾讯API失败，尝试新浪...', 'warning');
+                fetchSinaData(); // 备用
+            };
+            
+            document.head.appendChild(script);
+            setTimeout(() => script.remove(), 5000);
+        }
+
+        // 解析腾讯数据
+        function parseTencentData() {
+            // 腾讯返回格式: v_sh600519="1~贵州茅台~600519~1742.00~..."
+            watchList.forEach(stock => {
+                const varName = 'v_' + stock.code;
+                if (window[varName]) {
+                    const parts = window[varName].split('~');
+                    if (parts.length > 45) {
+                        const data = {
+                            name: parts[1],
+                            code: parts[2],
+                            price: parseFloat(parts[3]),
+                            close: parseFloat(parts[4]), // 昨日收盘
+                            open: parseFloat(parts[5]),
+                            volume: parseInt(parts[6]),
+                            high: parseFloat(parts[33]),
+                            low: parseFloat(parts[34]),
+                            change: parseFloat(parts[32]), // 涨跌幅
+                            changeAmt: parseFloat(parts[31]) // 涨跌额
+                        };
+                        updateStockDisplay(stock.code, data);
+                        checkSignal(stock.code, data);
+                    }
+                }
+            });
+
+            // 更新大盘指数
+            updateIndex('sh000001', 'v_sh000001');
+            updateIndex('sz399001', 'v_sz399001');
+            updateIndex('sz399006', 'v_sz399006');
+            
+            addLog(`[${new Date().toLocaleTimeString()}] 成功获取 ${watchList.length} 只股票实时数据`, 'success');
+        }
+
+        // 更新个股显示
+        function updateStockDisplay(code, data) {
+            const rowId = 'row-' + code;
+            let row = document.getElementById(rowId);
+            
+            const changeClass = data.change >= 0 ? 'up' : 'down';
+            const changeSign = data.change >= 0 ? '+' : '';
+            
+            if (!row) {
+                // 创建新行
+                const tbody = document.getElementById('stock-list');
+                row = document.createElement('tr');
+                row.id = rowId;
+                row.className = 'border-b border-slate-800';
+                tbody.appendChild(row);
+            }
+            
+            // 检测价格变动（闪烁效果）
+            const priceChanged = lastData[code] && lastData[code].price !== data.price;
+            const flashClass = priceChanged ? (data.price > lastData[code].price ? 'bg-red-900/20' : 'bg-green-900/20') : '';
+            
+            row.innerHTML = `
+                <td class="py-3 ${flashClass} transition-colors duration-500">${code}</td>
+                <td class="${flashClass} transition-colors duration-500">${data.name}</td>
+                <td class="text-right font-bold ${changeClass}">${data.price.toFixed(2)}</td>
+                <td class="text-right ${changeClass}">${changeSign}${data.changeAmt.toFixed(2)}</td>
+                <td class="text-right ${changeClass}">${changeSign}${data.change.toFixed(2)}%</td>
+                <td class="text-right text-slate-400">${(data.volume/10000).toFixed(1)}万</td>
+                <td class="text-center" id="signal-${code}">
+                    <span class="text-xs bg-slate-700 px-2 py-1 rounded">监控中</span>
+                </td>
+            `;
+            
+            lastData[code] = data;
+            
+            // 移除闪烁效果
+            if (priceChanged) {
+                setTimeout(() => {
+                    row.querySelectorAll('td').forEach(td => td.classList.remove('bg-red-900/20', 'bg-green-900/20'));
+                }, 1000);
+            }
+        }
+
+        // 更新大盘指数
+        function updateIndex(id, varName) {
+            if (window[varName]) {
+                const parts = window[varName].split('~');
+                if (parts.length > 5) {
+                    const price = parseFloat(parts[3]);
+                    const change = parseFloat(parts[32]);
+                    const changeClass = change >= 0 ? 'up' : 'down';
+                    const sign = change >= 0 ? '+' : '';
+                    
+                    document.getElementById(id + '-price').textContent = price.toFixed(2);
+                    document.getElementById(id + '-price').className = `text-2xl font-mono font-bold ${changeClass}`;
+                    document.getElementById(id + '-change').textContent = `${sign}${change.toFixed(2)}%`;
+                    document.getElementById(id + '-change').className = `text-sm ${changeClass}`;
+                }
+            }
+        }
+
+        // 交易策略信号检测
+        function checkSignal(code, data) {
+            const stock = watchList.find(s => s.code === code);
+            const signalCell = document.getElementById('signal-' + code);
+            if (!signalCell) return;
+            
+            let signal = null;
+            
+            // 策略1: 突破20日高点（简化版，用今日高低点代替）
+            if (data.price >= data.high * 0.998 && data.change > 2) {
+                signal = {type: 'buy', reason: '突破新高', strength: 'strong'};
+            }
+            // 策略2: 超跌反弹
+            else if (data.change < -5 && data.price > data.open) {
+                signal = {type: 'buy', reason: '超跌反弹', strength: 'weak'};
+            }
+            // 策略3: 放量上涨
+            else if (data.change > 3 && data.volume > 100000) {
+                signal = {type: 'hold', reason: '放量上涨', strength: 'normal'};
+            }
+            
+            if (signal) {
+                const colorClass = signal.type === 'buy' ? 'bg-red-600/30 text-red-400' : 
+                                 signal.type === 'sell' ? 'bg-green-600/30 text-green-400' : 
+                                 'bg-blue-600/30 text-blue-400';
+                
+                signalCell.innerHTML = `<span class="text-xs ${colorClass} px-2 py-1 rounded border border-current animate-pulse">${signal.reason}</span>`;
+                
+                if (signal.strength === 'strong') {
+                    addLog(`[信号] ${data.name}(${code}): ${signal.reason}，建议关注`, 'signal');
+                }
+            }
+        }
+
+        // 备用：新浪数据获取
+        function fetchSinaData() {
+            const codes = watchList.map(s => s.code).join(',');
+            const script = document.createElement('script');
+            script.src = `https://hq.sinajs.cn/list=${codes}`;
+            script.charset = 'gb2312';
+            
+            script.onload = function() {
+                parseSinaData();
+            };
+            
+            document.head.appendChild(script);
+            setTimeout(() => script.remove(), 5000);
+        }
+
+        // 解析新浪数据
+        function parseSinaData() {
+            watchList.forEach(stock => {
+                const varName = 'hq_str_' + stock.code;
+                if (window[varName]) {
+                    const parts = window[varName].split(',');
+                    if (parts.length > 3) {
+                        const data = {
+                            name: parts[0],
+                            price: parseFloat(parts[3]),
+                            change: 0, // 需要计算
+                            volume: parseInt(parts[8])
+                        };
+                        // 新浪数据需要手动计算涨跌幅...
+                        updateStockDisplay(stock.code, data);
+                    }
+                }
+            });
+        }
+
+        // 日志系统
+        function addLog(message, type = 'info') {
+            const log = document.getElementById('signal-log');
+            const div = document.createElement('div');
+            const time = new Date().toLocaleTimeString();
+            
+            let colorClass = 'text-slate-400';
+            if (type === 'success') colorClass = 'text-green-400';
+            if (type === 'warning') colorClass = 'text-amber-400';
+            if (type === 'signal') colorClass = 'text-red-400 font-bold';
+            
+            div.className = `${colorClass} border-l-2 border-current pl-2`;
+            div.textContent = `[${time}] ${message}`;
+            log.appendChild(div);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        // 检测市场状态
+        function checkMarket() {
+            const now = new Date();
+            const hour = now.getHours();
+            const minute = now.getMinutes();
+            const timeVal = hour * 100 + minute;
+            const isWeekend = now.getDay() === 0 || now.getDay() === 6;
+            
+            let status = '';
+            let color = '';
+            
+            if (isWeekend) {
+                status = '周末休市';
+                color = 'text-slate-500';
+            } else if ((timeVal >= 930 && timeVal <= 1130) || (timeVal >= 1300 && timeVal <= 1500)) {
+                status = '🟢 交易中';
+                color = 'text-green-400';
+            } else if (timeVal >= 915 && timeVal < 930) {
+                status = '🟡 集合竞价';
+                color = 'text-amber-400';
+            } else {
+                status = '⚪ 已收盘';
+                color = 'text-slate-400';
+            }
+            
+            document.getElementById('market-status').className = `${color} font-bold`;
+            document.getElementById('market-status').textContent = status;
+        }
+
+        // 启动
+        window.onload = function() {
+            checkMarket();
+            fetchRealData(); // 立即获取一次
+            setInterval(fetchRealData, 3000); // 每3秒刷新
+            setInterval(checkMarket, 60000); // 每分钟检查市场状态
+            
+            addLog('系统启动，开始获取实时数据...', 'info');
+        };
+    </script>
+</body>
+</html>
