@@ -1,0 +1,11 @@
+{
+  "name": "evo-quant-trader",
+  "version": "1.0.0",
+  "description": "Real-time quantitative trading dashboard with EvoMap integration",
+  "scripts": {
+    "start": "serve ."
+  },
+  "dependencies": {
+    "serve": "^14.0.0"
+  }
+}
